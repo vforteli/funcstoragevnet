@@ -1,0 +1,171 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "VNetName": {
+            "type": "string"
+        },
+        "FunctionSubnetName": {
+            "type": "string"
+        },
+        "FunctionAppName": {
+            "type": "string"
+        },
+        "HostingPlanName": {
+            "type": "string"
+        },
+        "StorageAccountName": {
+            "type": "string"
+        }
+    },
+    "variables": {
+        "contentShareName": "[toLower(parameters('FunctionAppName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2020-05-01",
+            "name": "[parameters('VNetName')]",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "addressSpace": {
+                    "addressPrefixes": [ "10.0.0.0/22" ]
+                },
+                "subnets": [
+                    {
+                        "name": "[parameters('FunctionSubnetName')]",
+                        "properties": {
+                            "addressPrefix": "10.0.0.0/24",
+                            "serviceEndpoints": [
+                                {
+                                    "service": "Microsoft.Storage",
+                                    "locations": [ "[resourceGroup().location]" ]
+                                }
+                            ],
+                            "delegations": [
+                                {
+                                    "name": "delegation",
+                                    "properties": {
+                                        "serviceName": "Microsoft.Web/serverfarms"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+
+            }
+        },
+        {
+            "name": "[parameters('StorageAccountName')]",
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2019-06-01",
+            "location": "[resourceGroup().location]",
+            "kind": "StorageV2",
+            "identity": { "type": "SystemAssigned" },
+            "sku": { "name": "Standard_LRS" },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]"
+            ],
+            "properties": {
+                "supportsHttpsTrafficOnly": true,
+                "networkAcls": {
+                    "defaultAction": "Deny",
+                    "virtualNetworkRules": [
+                        {
+                            "action": "Allow",
+                            "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets',parameters('VNetName'),parameters('FunctionSubnetName'))]"
+                        }
+                    ]
+                }
+            },
+            "resources": [
+                {
+                    "name": "[concat(parameters('StorageAccountName'), '/default/', variables('contentShareName'))]",
+                    "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+                    "apiVersion": "2019-04-01",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]"
+                    ]
+                }
+            ]
+        },
+        {
+            "apiVersion": "2020-06-01",
+            "name": "[parameters('HostingPlanName')]",
+            "type": "Microsoft.Web/serverfarms",
+            "location": "[resourceGroup().location]",
+            "kind": "linux",
+            "properties": {
+                "workerSize": "3",
+                "workerSizeId": "3",
+                "numberOfWorkers": "1",
+                "reserved": true,
+                "maximumElasticWorkerCount": "20"
+            },
+            "sku": {
+                "Tier": "ElasticPremium",
+                "Name": "EP1"
+            }
+        },
+        {
+            "apiVersion": "2020-06-01",
+            "name": "[parameters('FunctionAppName')]",
+            "type": "Microsoft.Web/sites",
+            "kind": "functionapp,linux,container",
+            "location": "[resourceGroup().location]",
+            "identity": { "type": "SystemAssigned" },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]",
+                "[resourceId('Microsoft.Web/serverfarms', parameters('HostingPlanName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]"
+            ],
+            "properties": {
+                "siteConfig": {
+                    "linuxFxVersion": "DOCKER|mcr.microsoft.com/azure-functions/dotnet:3.0-appservice-quickstart",
+                    "http20Enabled": true,
+                    "minTlsVersion": "1.2",
+                    "ftpsState": "Disabled"
+                },
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('HostingPlanName'))]",
+                "clientAffinityEnabled": false
+            },
+            "resources": [
+                {
+                    "name": "appsettings",
+                    "type": "config",
+                    "apiVersion": "2020-06-01",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]",
+                        "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]"
+                    ],
+                    "properties": {
+                        "FUNCTIONS_EXTENSION_VERSION": "~3",
+                        "WEBSITES_ENABLE_APP_SERVICE_STORAGE": "false",
+                        "DOCKER_REGISTRY_SERVER_URL": "https://mcr.microsoft.com",
+                        "DOCKER_REGISTRY_SERVER_USERNAME": "",
+                        "DOCKER_REGISTRY_SERVER_PASSWORD": "",
+                        "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[concat('DefaultEndpointsProtocol=https;AccountName=',parameters('StorageAccountName'),';AccountKey=',listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName')), '2019-06-01').keys[0].value,';EndpointSuffix=','core.windows.net')]",
+                        "WEBSITE_CONTENTSHARE": "[variables('contentShareName')]",
+                        "WEBSITE_CONTENTOVERVNET": "1"
+                    }
+                },
+                {
+                    "type": "networkConfig",
+                    "apiVersion": "2020-06-01",
+                    "name": "virtualNetwork",
+                    "location": "[resourceGroup().location]",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]",
+                        "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]"
+                    ],
+                    "properties": {
+                        "subnetResourceId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('VNetName'), parameters('FunctionSubnetName'))]",
+                        "swiftSupported": true
+                    }
+                }
+            ]
+        }
+    ],
+    "outputs": {}
+}
