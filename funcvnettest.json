@@ -264,10 +264,7 @@
                             "priority": 510,
                             "direction": "Outbound",
                             "sourcePortRanges": [],
-                            "destinationPortRanges": [
-                                "443",
-                                "80"
-                            ],
+                            "destinationPortRange": "*",
                             "sourceAddressPrefixes": [],
                             "destinationAddressPrefixes": []
                         }
