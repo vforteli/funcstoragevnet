@@ -2,13 +2,13 @@
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
     "contentVersion": "1.0.0.0",
     "parameters": {
-        "VNetName": {
-            "type": "string"
-        },
-        "FunctionSubnetName": {
+        "AppName": {
             "type": "string"
         },
         "FunctionAppName": {
+            "type": "string"
+        },
+        "FunctionSubnetName": {
             "type": "string"
         },
         "HostingPlanName": {
@@ -16,44 +16,112 @@
         },
         "StorageAccountName": {
             "type": "string"
+        },
+        "VNetName": {
+            "type": "string"
         }
     },
     "variables": {
-        "contentShareName": "[toLower(parameters('FunctionAppName'))]"
+        "appInsightsName": "[concat(parameters('AppName'), '-appinsights')]",
+        "contentShareName": "[toLower(parameters('FunctionAppName'))]",
+        "funcNsgName": "[concat(parameters('AppName'), '-func-nsg')]",
+        "keyVaultName": "[concat(parameters('AppName'), '-kev')]",
+        "logAnalyticsWorkspaceName": "[concat(parameters('AppName'), '-laws')]",
+        "storageKeySecretName": "funcstoragekey"
     },
     "resources": [
         {
-            "type": "Microsoft.Network/virtualNetworks",
-            "apiVersion": "2020-05-01",
-            "name": "[parameters('VNetName')]",
+            "apiVersion": "2018-11-01",
+            "name": "[parameters('FunctionAppName')]",
+            "type": "Microsoft.Web/sites",
+            "kind": "functionapp,linux,container",
             "location": "[resourceGroup().location]",
+            "identity": { "type": "SystemAssigned" },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]",
+                "[resourceId('Microsoft.Web/serverfarms', parameters('HostingPlanName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]"
+            ],
             "properties": {
-                "addressSpace": {
-                    "addressPrefixes": [ "10.0.0.0/22" ]
-                },
-                "subnets": [
-                    {
-                        "name": "[parameters('FunctionSubnetName')]",
-                        "properties": {
-                            "addressPrefix": "10.0.0.0/24",
-                            "serviceEndpoints": [
-                                {
-                                    "service": "Microsoft.Storage",
-                                    "locations": [ "[resourceGroup().location]" ]
-                                }
-                            ],
-                            "delegations": [
-                                {
-                                    "name": "delegation",
-                                    "properties": {
-                                        "serviceName": "Microsoft.Web/serverfarms"
-                                    }
-                                }
-                            ]
+                "siteConfig": {
+                    "linuxFxVersion": "DOCKER|mcr.microsoft.com/azure-functions/dotnet:3.0-appservice-quickstart",
+                    "http20Enabled": true,
+                    "minTlsVersion": "1.2",
+                    "ftpsState": "Disabled",
+                    "scmIpSecurityRestrictions": [
+                        {
+                            "ipAddress": "AzureContainerRegistry",
+                            "action": "Allow",
+                            "tag": "ServiceTag",
+                            "priority": 300,
+                            "description": "Allow ACR with ServiceTag"
                         }
+                    ],
+                    "scmIpSecurityRestrictionsUseMain": false,
+                    "functionsRuntimeScaleMonitoringEnabled": true
+                },
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('HostingPlanName'))]",
+                "clientAffinityEnabled": false
+            },
+            "resources": [
+                {
+                    "name": "appsettings",
+                    "type": "config",
+                    "apiVersion": "2020-06-01",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]",
+                        "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]",
+                        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+                        "[resourceId('microsoft.insights/components', variables('appInsightsName'))]"
+                    ],
+                    "properties": {
+                        "FUNCTIONS_EXTENSION_VERSION": "~3",
+                        "FUNCTIONS_WORKER_RUNTIME": "dotnet",
+                        "WEBSITES_ENABLE_APP_SERVICE_STORAGE": "false",
+                        "DOCKER_REGISTRY_SERVER_URL": "https://mcr.microsoft.com",
+                        "DOCKER_REGISTRY_SERVER_USERNAME": "",
+                        "DOCKER_REGISTRY_SERVER_PASSWORD": "",
+                        "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[concat('@Microsoft.KeyVault(SecretUri=', reference(resourceId('Microsoft.KeyVault/vaults/secrets',variables('keyVaultName'),variables('storageKeySecretName'))).secretUri, ')')]",
+                        "AzureWebJobsStorage": "[concat('@Microsoft.KeyVault(SecretUri=', reference(resourceId('Microsoft.KeyVault/vaults/secrets',variables('keyVaultName'),variables('storageKeySecretName'))).secretUri, ')')]",
+                        "WEBSITE_CONTENTSHARE": "[variables('contentShareName')]",
+                        "WEBSITE_CONTENTOVERVNET": "1",
+                        "WEBSITE_VNET_ROUTE_ALL": "1",
+                        "APPINSIGHTS_INSTRUMENTATIONKEY": "[reference(resourceId('microsoft.insights/components', variables('appInsightsName'))).InstrumentationKey]",
+                        "APPLICATIONINSIGHTS_CONNECTION_STRING": "[reference(resourceId('microsoft.insights/components', variables('appInsightsName'))).ConnectionString]"
                     }
-                ]
-
+                },
+                {
+                    "type": "networkConfig",
+                    "apiVersion": "2020-06-01",
+                    "name": "virtualNetwork",
+                    "location": "[resourceGroup().location]",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]",
+                        "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]"
+                    ],
+                    "properties": {
+                        "subnetResourceId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('VNetName'), parameters('FunctionSubnetName'))]",
+                        "swiftSupported": true
+                    }
+                }
+            ]
+        },
+        {
+            "apiVersion": "2020-06-01",
+            "name": "[parameters('HostingPlanName')]",
+            "type": "Microsoft.Web/serverfarms",
+            "location": "[resourceGroup().location]",
+            "kind": "linux",
+            "properties": {
+                "workerSize": "3",
+                "workerSizeId": "3",
+                "numberOfWorkers": "1",
+                "reserved": true,
+                "maximumElasticWorkerCount": "20"
+            },
+            "sku": {
+                "Tier": "ElasticPremium",
+                "Name": "EP1"
             }
         },
         {
@@ -91,80 +159,236 @@
             ]
         },
         {
-            "apiVersion": "2020-06-01",
-            "name": "[parameters('HostingPlanName')]",
-            "type": "Microsoft.Web/serverfarms",
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2020-05-01",
+            "name": "[parameters('VNetName')]",
             "location": "[resourceGroup().location]",
-            "kind": "linux",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/networkSecurityGroups', variables('funcNsgName'))]"
+            ],
             "properties": {
-                "workerSize": "3",
-                "workerSizeId": "3",
-                "numberOfWorkers": "1",
-                "reserved": true,
-                "maximumElasticWorkerCount": "20"
-            },
-            "sku": {
-                "Tier": "ElasticPremium",
-                "Name": "EP1"
+                "addressSpace": {
+                    "addressPrefixes": [ "10.0.0.0/22" ]
+                },
+                "subnets": [
+                    {
+                        "name": "[parameters('FunctionSubnetName')]",
+                        "properties": {
+                            "addressPrefix": "10.0.0.0/24",
+                            "networkSecurityGroup": {
+                                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('funcNsgName'))]"
+                            },
+                            "serviceEndpoints": [
+                                {
+                                    "service": "Microsoft.Storage",
+                                    "locations": [ "*" ]
+                                },
+                                {
+                                    "service": "Microsoft.AzureActiveDirectory",
+                                    "locations": [ "*" ]
+                                },
+                                {
+                                    "service": "Microsoft.KeyVault",
+                                    "locations": [ "*" ]
+                                },
+                                {
+                                    "service": "Microsoft.ContainerRegistry",
+                                    "locations": [ "*" ]
+                                },
+                                {
+                                    "service": "Microsoft.ServiceBus",
+                                    "locations": [ "*" ]
+                                }
+                            ],
+                            "delegations": [
+                                {
+                                    "name": "delegation",
+                                    "properties": {
+                                        "serviceName": "Microsoft.Web/serverfarms"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
             }
         },
         {
-            "apiVersion": "2020-06-01",
-            "name": "[parameters('FunctionAppName')]",
-            "type": "Microsoft.Web/sites",
-            "kind": "functionapp,linux,container",
+            "name": "[variables('appInsightsName')]",
+            "type": "microsoft.insights/components",
             "location": "[resourceGroup().location]",
-            "identity": { "type": "SystemAssigned" },
+            "apiVersion": "2020-02-02-preview",
             "dependsOn": [
-                "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]",
-                "[resourceId('Microsoft.Web/serverfarms', parameters('HostingPlanName'))]",
-                "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]"
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName'))]"
             ],
             "properties": {
-                "siteConfig": {
-                    "linuxFxVersion": "DOCKER|mcr.microsoft.com/azure-functions/dotnet:3.0-appservice-quickstart",
-                    "http20Enabled": true,
-                    "minTlsVersion": "1.2",
-                    "ftpsState": "Disabled"
+                "ApplicationId": "[variables('appInsightsName')]",
+                "Application_Type": "web",
+                "Flow_Type": "Redfield",
+                "Request_Source": "IbizaAIExtension",
+                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName'))]"
+            }
+        },
+        {
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "apiVersion": "2020-05-01",
+            "name": "[variables('funcNsgName')]",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "securityRules": [
+                    {
+                        "name": "DenyInternet",
+                        "properties": {
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "Internet",
+                            "access": "Deny",
+                            "priority": 1000,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowStorage",
+                        "properties": {
+                            "protocol": "TCP",
+                            "sourcePortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "Storage.NorthEurope",
+                            "access": "Allow",
+                            "priority": 510,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [
+                                "443",
+                                "80"
+                            ],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowAppInsights",
+                        "properties": {
+                            "protocol": "TCP",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "443",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "AzureMonitor",
+                            "access": "Allow",
+                            "priority": 520,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowKeyVault",
+                        "properties": {
+                            "protocol": "TCP",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "443",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "AzureKeyVault.NorthEurope",
+                            "access": "Allow",
+                            "priority": 530,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowACR",
+                        "properties": {
+                            "protocol": "TCP",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "443",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "AzureContainerRegistry.NorthEurope",
+                            "access": "Allow",
+                            "priority": 550,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowMCR",
+                        "properties": {
+                            "protocol": "TCP",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "443",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "MicrosoftContainerRegistry.NorthEurope",
+                            "access": "Allow",
+                            "priority": 560,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.KeyVault/vaults",
+            "apiVersion": "2016-10-01",
+            "location": "[resourceGroup().location]",
+            "name": "[variables('keyVaultName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]",
+                "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]"
+            ],
+            "properties": {
+                "sku": {
+                    "name": "standard",
+                    "family": "A"
                 },
-                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('HostingPlanName'))]",
-                "clientAffinityEnabled": false
+                "tenantId": "[subscription().tenantId]",
+                "enabledForDeployment": false,
+                "enabledForDiskEncryption": false,
+                "enabledForTemplateDeployment": false,
+                "enableSoftDelete": true,
+                "accessPolicies": [
+                    {
+                        "tenantId": "[reference(concat('Microsoft.Web/sites/', parameters('FunctionAppName')), '2020-06-01', 'Full').identity.tenantId]",
+                        "objectId": "[reference(concat('Microsoft.Web/sites/', parameters('FunctionAppName')), '2020-06-01', 'Full').identity.principalId]",
+                        "permissions": { "secrets": [ "get" ] }
+                    }
+                ]
             },
             "resources": [
                 {
-                    "name": "appsettings",
-                    "type": "config",
-                    "apiVersion": "2020-06-01",
+                    "type": "secrets",
+                    "apiVersion": "2016-10-01",
+                    "name": "[variables('storageKeySecretName')]",
                     "dependsOn": [
-                        "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]",
-                        "[resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName'))]"
+                        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
                     ],
                     "properties": {
-                        "FUNCTIONS_EXTENSION_VERSION": "~3",
-                        "WEBSITES_ENABLE_APP_SERVICE_STORAGE": "false",
-                        "DOCKER_REGISTRY_SERVER_URL": "https://mcr.microsoft.com",
-                        "DOCKER_REGISTRY_SERVER_USERNAME": "",
-                        "DOCKER_REGISTRY_SERVER_PASSWORD": "",
-                        "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[concat('DefaultEndpointsProtocol=https;AccountName=',parameters('StorageAccountName'),';AccountKey=',listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName')), '2019-06-01').keys[0].value,';EndpointSuffix=','core.windows.net')]",
-                        "WEBSITE_CONTENTSHARE": "[variables('contentShareName')]",
-                        "WEBSITE_CONTENTOVERVNET": "1"
-                    }
-                },
-                {
-                    "type": "networkConfig",
-                    "apiVersion": "2020-06-01",
-                    "name": "virtualNetwork",
-                    "location": "[resourceGroup().location]",
-                    "dependsOn": [
-                        "[resourceId('Microsoft.Web/sites', parameters('FunctionAppName'))]",
-                        "[resourceId('Microsoft.Network/virtualNetworks', parameters('VNetName'))]"
-                    ],
-                    "properties": {
-                        "subnetResourceId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('VNetName'), parameters('FunctionSubnetName'))]",
-                        "swiftSupported": true
+                        "value": "[concat('DefaultEndpointsProtocol=https;AccountName=',parameters('StorageAccountName'),';AccountKey=',listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName')), '2019-06-01').keys[0].value,';EndpointSuffix=','core.windows.net')]"
                     }
                 }
             ]
+        },
+        {
+            "apiVersion": "2020-10-01",
+            "name": "[variables('logAnalyticsWorkspaceName')]",
+            "location": "[resourceGroup().location]",
+            "type": "Microsoft.OperationalInsights/workspaces"
         }
     ],
     "outputs": {}
