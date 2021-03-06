@@ -3,4 +3,4 @@ ARM Template for deploying azure function app with storage account with vnet fir
 Turns out this works, as long as the storage account file share is also explicitly created
 
 This template also contains an NSG for blocking outbound traffic from function, except to needed resources using WEBSITE_VNET_ROUTE_ALL.   
-For some reason the Storage account rule also needs port 80 to work, although this is not listed as a required port anywhere
+For some reason the Storage account rule also needs other ports than 443, but these are not listed anywhere apparently
